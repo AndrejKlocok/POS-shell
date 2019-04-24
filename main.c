@@ -1,4 +1,6 @@
-#define _POSIX_SOURCE
+#define _GNU_SOURCE
+#define _XOPEN_SOURCE
+#define _XOPEN_SOURCE_EXTENDED 1 /* XPG 4.2 - needed for WCOREDUMP() */
 
 #include <errno.h>
 #include <stdio.h>
@@ -11,31 +13,112 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 
-#define BUFFSIZE 513
+#define BUFFSIZE 513 //line_size
 
+/**
+ * @brief Structure that represents program
+ * 
+ */
 typedef struct program
 {
-    char *name;
-    char **argv;
-    int argc;
-    bool parseError;
-    char *outputFilePath;
-    char *inputFilePath;
-} Program;
+    char *name;             // command`s name
+    char **argv;            // command`s arguments
+    int argc;               // number of arguments
+    bool parseError;        // parse error occures
+    char *outputFilePath;   // output file path
+    char *inputFilePath;    // input file path
+} Program;   
 
+/**
+ * @brief 
+ * 
+ */
 typedef struct data
 {
-    bool end;
-    char buff[BUFFSIZE];
-    pthread_mutex_t mutex;
-    pthread_mutex_t mutex_child;
-    pid_t child_pid;
-    pthread_cond_t condition;
-    bool background;
+    bool end;                       // while(end)
+    char buff[BUFFSIZE];            // input buffer
+    pthread_mutex_t mutex;          // thread sync
+    pthread_mutex_t mutex_child;    // child signal sync
+    pid_t child_pid;                // pid of child
+    pthread_cond_t condition;       // contidion variable
+    bool background;                // execution of process in background
 } Data;
 
+//prototypes
+void condition_wait(Data *data);
+void condition_signal(Data *data);
+void parse_args(Data *data, Program *program);
+void exec_program(Data *data, Program *program);
+void *exec_thread_function(void *arg);
+void *read_thread_function(void *arg);
+void sigint_handler(int sig);
+void sigchld_handler(int sig);
+
+//global variable (signals)
 static Data data;
 
+int main(int argc, char const *argv[])
+{
+    pthread_t read_thread, exec_thread;     // main threads
+    pthread_attr_t attr;
+    struct sigaction sigint, sigchild;      // signal actions
+
+    // init data struct
+    data.end = false;
+    data.child_pid = 0;
+
+    // init attr
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+    // register sigint
+    sigint.sa_flags = 0;
+    sigemptyset(&sigint.sa_mask);
+    sigint.sa_handler = sigint_handler;
+
+    if (sigaction(SIGINT, &sigint, NULL) == -1)
+    {
+        perror("SIGINT()");
+        return (1);
+    }
+
+    // register sigterm
+    sigchild.sa_flags = 0;
+    sigemptyset(&sigchild.sa_mask);
+    sigchild.sa_handler = sigchld_handler;
+
+    if (sigaction(SIGCHLD, &sigchild, NULL) == -1)
+    {
+        perror("SIGCHLD()");
+        return (1);
+    }
+    //init mutex and condition variable
+    pthread_mutex_init(&(data.mutex), NULL);
+    pthread_mutex_init(&(data.mutex_child), NULL);
+    pthread_cond_init(&(data.condition), NULL);
+
+    //spawn threads
+    pthread_create(&read_thread, &attr, read_thread_function, &data);
+    pthread_create(&exec_thread, &attr, exec_thread_function, &data);
+
+    //join
+    pthread_join(read_thread, NULL);
+    pthread_join(exec_thread, NULL);
+
+    //destroy
+    pthread_mutex_destroy(&(data.mutex));
+    pthread_mutex_destroy(&(data.mutex_child));
+    pthread_cond_destroy(&(data.condition));
+    pthread_attr_destroy(&attr);
+
+    return 0;
+}
+
+/**
+ * @brief Thread synchronization function -> wait for condition variable.
+ * 
+ * @param data struct
+ */
 void condition_wait(Data *data)
 {
     pthread_mutex_lock(&data->mutex);
@@ -43,6 +126,11 @@ void condition_wait(Data *data)
     pthread_mutex_unlock(&data->mutex);
 }
 
+/**
+ * @brief Thread synchronization function -> signal condition variable.
+ * 
+ * @param data struct
+ */
 void condition_signal(Data *data)
 {
     pthread_mutex_lock(&data->mutex);
@@ -50,15 +138,23 @@ void condition_signal(Data *data)
     pthread_mutex_unlock(&data->mutex);
 }
 
+/**
+ * @brief Function parses command arguments from data struct and stores it to program data.
+ * 
+ * @param data      struct
+ * @param program   struct
+ */
 void parse_args(Data *data, Program *program)
 {
-    //remove new line \n
+    // remove new line \n
     size_t n = strlen(data->buff) - 1;
     if (data->buff[n] == '\n')
         data->buff[n] = '\0';
-
+    
+    // split name of program according to white spaces
     char *token;
     token = strtok(data->buff, " ");
+    // allocate memory
     program->name = (char *)malloc(sizeof(char) * (strlen(token) +1));
     program->argv = (char **)malloc(sizeof(char *));
     program->argv[program->argc] = (char*)malloc(sizeof(char)* strlen(token));
@@ -72,6 +168,7 @@ void parse_args(Data *data, Program *program)
     strcpy(program->argv[program->argc], token);
     token = strtok(NULL, " ");
     
+    // parse command arguments
     while (token != NULL)
     {
         //backgound
@@ -109,6 +206,7 @@ void parse_args(Data *data, Program *program)
             program->inputFilePath = (char *)malloc(sizeof(char) * strlen(token));
             strcpy(program->inputFilePath, token);
         }
+        //rest
         else{
             program->argc++;
             program->argv = (char **)realloc(program->argv, (program->argc+1)*sizeof(char*));
@@ -130,14 +228,14 @@ void parse_args(Data *data, Program *program)
     }
     //NULL
     program->argv = (char **)realloc(program->argv, (program->argc+2)*sizeof(char*));
-    /*
-    for(size_t i = 0; i <= program->argc; i++)
-    {
-        printf("argv[%ld] = %s\n", i, program->argv[i]);
-    }
-    */
 }
 
+/**
+ * @brief Function executes command described in program structure as child (fork).
+ * 
+ * @param data 
+ * @param program 
+ */
 void exec_program(Data *data, Program *program)
 {
     pid_t id;
@@ -148,6 +246,7 @@ void exec_program(Data *data, Program *program)
     {
         //child
         int in,out = -1;
+        //duplicate fd stdin, stdout
         if(program->outputFilePath != NULL){
             out = open(program->outputFilePath, O_WRONLY | O_TRUNC);
             if(out < 0){
@@ -178,7 +277,7 @@ void exec_program(Data *data, Program *program)
                 exit(1);
             }
         }
-        
+        //exec program
         execvp(program->name, program->argv);
         //error
         perror("execvp error");
@@ -204,16 +303,24 @@ void exec_program(Data *data, Program *program)
         exit(1);
     }
 }
-
+/**
+ * @brief Thread function that parses data buffer and execudes commands.
+ * 
+ * @param arg       data structre
+ * @return void*    status
+ */
 void *exec_thread_function(void *arg)
 {
     Data *data = (Data *)arg;
-    Program program;
 
+    //thread cycle
     while (!data->end)
     {
+        Program program;
+        //wait for read thread
         condition_wait(data);
-
+        
+        //init struct
         program.argc = 0;
         program.name = NULL;
         program.argv = NULL;
@@ -251,26 +358,33 @@ void *exec_thread_function(void *arg)
 
     return (void *)0;
 }
-
+/**
+ * @brief Read thread function reads input from stdin
+ * 
+ * @param arg       data structure
+ * @return void*    status
+ */
 void *read_thread_function(void *arg)
 {
     Data *data = (Data *)arg;
     int n = 0;
 
+    //thread loop
     while (!data->end)
     {
         printf(">$");
         fflush(stdout);
         memset(data->buff, 0, BUFFSIZE);
 
+        //read 513 chars
         n = read(STDIN_FILENO, data->buff, 513);
-
-        data->buff[BUFFSIZE - 1] = '\0';
+        
+        //last char will be end of string char
+        data->buff[BUFFSIZE-1] = '\0';
         if (n >= BUFFSIZE)
         {
             fprintf(stderr, "File too long!\n");
-            while (getchar() != '\n')
-                ;
+            while (getchar() != '\n');
             continue;
         }
         else if (n == 1)
@@ -285,17 +399,27 @@ void *read_thread_function(void *arg)
     return (void *)0;
 }
 
+/**
+ * @brief SIGINT handler function
+ * 
+ * @param sig number
+ */
 void sigint_handler(int sig)
 {
     pthread_mutex_lock(&data.mutex_child);
     if (data.child_pid != 0)
     {
-        kill(data.child_pid, SIGTERM);
+        printf("\nKilling foreground process: %d\n", data.child_pid);
+        kill(data.child_pid, SIGKILL);
     }
     data.child_pid = 0;
     pthread_mutex_unlock(&data.mutex_child);
 }
-
+/**
+ * @brief SIGCHLD handler function
+ * 
+ * @param sig number
+ */
 void sigchld_handler(int sig)
 {
     if (!data.background)
@@ -305,61 +429,12 @@ void sigchld_handler(int sig)
     int status;
     pid_t pid = wait(&status);
     if (WIFEXITED(status))
-        fprintf(stderr, "Child %d terminated with status: %d\n", pid, WEXITSTATUS(status));
+        printf("\nChild %d terminated with status: %d\n", pid, WEXITSTATUS(status));
     else if (WIFSIGNALED(status))
-        fprintf(stderr, "Child %d received signal: %d\n", pid, WTERMSIG(status));
+        printf("\nChild %d received signal: %d\n", pid, WTERMSIG(status));
     else
-        fprintf(stderr, "Child %d terminated\n", pid);
-
-    printf(">$%s", data.buff);
+        printf("\nChild %d terminated\n", pid);
+    
+    printf(">$");
     fflush(stdout);
-}
-
-int main(int argc, char const *argv[])
-{
-    pthread_t read_thread, exec_thread;
-    pthread_attr_t attr;
-    struct sigaction sigint, sigchild;
-
-    data.end = false;
-    data.child_pid = 0;
-
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-
-    sigint.sa_flags = 0;
-    sigemptyset(&sigint.sa_mask);
-    sigint.sa_handler = sigint_handler;
-
-    if (sigaction(SIGINT, &sigint, NULL) == -1)
-    {
-        perror("SIGINT()");
-        return (1);
-    }
-
-    sigchild.sa_flags = 0;
-    sigemptyset(&sigchild.sa_mask);
-    sigchild.sa_handler = sigchld_handler;
-
-    if (sigaction(SIGCHLD, &sigchild, NULL) == -1)
-    {
-        perror("SIGCHLD()");
-        return (1);
-    }
-    pthread_mutex_init(&(data.mutex), NULL);
-    pthread_mutex_init(&(data.mutex_child), NULL);
-    pthread_cond_init(&(data.condition), NULL);
-
-    pthread_create(&read_thread, &attr, read_thread_function, &data);
-    pthread_create(&exec_thread, &attr, exec_thread_function, &data);
-
-    pthread_join(read_thread, NULL);
-    pthread_join(exec_thread, NULL);
-
-    pthread_mutex_destroy(&(data.mutex));
-    pthread_mutex_destroy(&(data.mutex_child));
-    pthread_cond_destroy(&(data.condition));
-    pthread_attr_destroy(&attr);
-
-    return 0;
 }
