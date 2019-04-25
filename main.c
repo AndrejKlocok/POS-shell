@@ -151,83 +151,80 @@ void parse_args(Data *data, Program *program)
     if (data->buff[n] == '\n')
         data->buff[n] = '\0';
     
-    // split name of program according to white spaces
-    char *token;
-    token = strtok(data->buff, " ");
-    // allocate memory
-    program->name = (char *)malloc(sizeof(char) * (strlen(token) +1));
-    program->argv = (char **)malloc(sizeof(char *));
-    program->argv[program->argc] = (char*)malloc(sizeof(char)* strlen(token));
+    char *pos_out, *pos_back, *pos_in;
+    char* delim;
+
+    //find occurences
+    pos_back = strchr(data->buff, '&');
+    pos_out = strchr(data->buff, '>');
+    pos_in = strchr(data->buff, '<');
     
-    if(program->name == NULL || program->argv == NULL || program->argv[program->argc]==NULL){
+    if(pos_back != NULL){
+        data->background = true;
+        *pos_back = '\0';
+    }
+
+    if(pos_out != NULL){
+        *pos_out = '\0';
+        pos_out++;
+    }
+
+    if(pos_in != NULL){
+        *pos_in = '\0';
+        pos_in++;
+    }
+
+    program->outputFilePath = pos_out;
+    program->inputFilePath = pos_in;
+    
+    program->name = data->buff;
+    program->argv = (char **)malloc(sizeof(char *));
+    program->argv[program->argc] = data->buff;
+    
+    if(program->argv == NULL){
         perror("malloc :");
         exit(1);
     }
 
-    strcpy(program->name, token);
-    strcpy(program->argv[program->argc], token);
-    token = strtok(NULL, " ");
-    
-    // parse command arguments
-    while (token != NULL)
-    {
-        //backgound
-        if (strcmp(token, "&") == 0)
-        {
-            data->background = true;
-            //last split must be null
-            if (strtok(NULL, " ") != NULL)
-            {
-                program->parseError = true;
-            }
+    delim = strchr(data->buff, ' ');
+    char next;
+    while(  delim!= NULL ){
+        next = delim[1];
+        
+        if(next == ' '){
+            *delim = '\0';
+            delim++;
+            delim = strchr(delim, ' ');
+            continue;
+        }
+        if( next == '\0'){
+            *delim = '\0';
             break;
         }
-        //outputfile
-        else if (strcmp(token, ">") == 0)
-        {
-            token = strtok(NULL, " ");
-            if (token == NULL || program->outputFilePath != NULL)
-            {
-                program->parseError = true;
-                break;
-            }
-            program->outputFilePath = (char *)malloc(sizeof(char) * strlen(token));
-            strcpy(program->outputFilePath, token);
-        }
-        //input file
-        else if (strcmp(token, "<") == 0)
-        {
-            token = strtok(NULL, " ");
-            if (token == NULL || program->inputFilePath != NULL)
-            {
-                program->parseError = true;
-                break;
-            }
-            program->inputFilePath = (char *)malloc(sizeof(char) * strlen(token));
-            strcpy(program->inputFilePath, token);
-        }
-        //rest
-        else{
-            program->argc++;
-            program->argv = (char **)realloc(program->argv, (program->argc+1)*sizeof(char*));
-            
-            //error handle
-            if (program->argv == NULL)
-            {
-                data->end = true;
-            }
-            program->argv[program->argc] = (char*)malloc(sizeof(char)* (strlen(token) +1));
-            if(program->argv[program->argc] == NULL){
-                perror("malloc :");
-                exit(1);
-            }
-            strcpy(program->argv[program->argc], token);
-        }
+        program->argc++;
+        program->argv = (char **)realloc(program->argv, (program->argc+1)*sizeof(char*));
         
-        token = strtok(NULL, " ");
+        //error handle
+        if (program->argv == NULL)
+        {
+            perror("malloc :");
+            exit(1);
+        }
+        *delim = '\0';
+        delim++;
+        program->argv[program->argc] = delim;
+        
+        delim = strchr(delim, ' ');
     }
+    
     //NULL
     program->argv = (char **)realloc(program->argv, (program->argc+2)*sizeof(char*));
+    if (program->argv == NULL)
+    {
+        perror("malloc :");
+        exit(1);
+    }
+    program->argv[program->argc+1] =NULL;
 }
 
 /**
@@ -330,7 +327,7 @@ void *exec_thread_function(void *arg)
         program.inputFilePath = NULL;
 
         parse_args(data, &program);
-
+        
         if (strcmp("exit", data->buff) == 0)
         {
             data->end = true;
@@ -343,17 +340,10 @@ void *exec_thread_function(void *arg)
         {
             exec_program(data, &program);
         }
-
-        condition_signal(data);
         //free memory
-        free(program.name);
-        free(program.outputFilePath);
-        free(program.inputFilePath);
-        
-        for(size_t i = 0; i <= program.argc; i++)
-            free(program.argv[i]);
-        
         free(program.argv);
+        program.argv = NULL;
+        condition_signal(data);
     }
 
     return (void *)0;
