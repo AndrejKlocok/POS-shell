@@ -1,3 +1,11 @@
+/**
+ * @file main.c
+ * @author Andrej Klocok (xkloco00@stud.fit.vutbr.cz)
+ * @brief 
+ * @version 0.1
+ * @date 2019-04-26
+ * 
+ */
 #define _GNU_SOURCE
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1 /* XPG 4.2 - needed for WCOREDUMP() */
@@ -174,6 +182,7 @@ void parse_args(Data *data, Program *program)
         pos_in++;
     }
 
+    // store pointers
     program->outputFilePath = pos_out;
     program->inputFilePath = pos_in;
     
@@ -186,6 +195,7 @@ void parse_args(Data *data, Program *program)
         exit(1);
     }
 
+    //parse whole buffer
     delim = strchr(data->buff, ' ');
     char next;
     while(  delim!= NULL ){
